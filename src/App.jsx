@@ -6,6 +6,7 @@ const loadEngine = () => import('./upscale.js')
 const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp', 'image/bmp', 'image/gif']
 const MAX_OUTPUT_SIDE = 16384 // limite de canvas dos navegadores
 const SLOW_PIXELS = 1_000_000
+const BACKEND_LABEL = { webgpu: 'placa de vídeo (WebGPU)', webgl: 'placa de vídeo (WebGL)', cpu: 'processador (CPU)' }
 
 function loadImage(file) {
   return new Promise((resolve, reject) => {
@@ -32,6 +33,7 @@ export default function App() {
   const [status, setStatus] = useState('idle') // idle | processing | done | error
   const [progress, setProgress] = useState(0)
   const [eta, setEta] = useState(null) // segundos restantes estimados
+  const [backend, setBackend] = useState(null) // webgpu | webgl | cpu
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [dragging, setDragging] = useState(false)
@@ -95,6 +97,7 @@ export default function App() {
       // Estima pelo ritmo dos últimos segundos: os primeiros blocos chegam em rajada
       // (compilação dos shaders) e distorceriam uma média desde o início.
       const samples = []
+      const startedAt = performance.now()
       const data = await upscaleImage(source.url, scale, quality, (p) => {
         setProgress(p)
         const now = performance.now()
@@ -104,8 +107,8 @@ export default function App() {
         if (now - first.now > 3000 && p > first.p) {
           setEta(Math.ceil((((1 - p) * (now - first.now)) / (p - first.p)) / 1000))
         }
-      })
-      setResult({ src: data, scale, quality })
+      }, setBackend)
+      setResult({ src: data, scale, quality, secs: Math.round((performance.now() - startedAt) / 1000) })
       setStatus('done')
     } catch (e) {
       if (e?.name === 'AbortError') {
@@ -249,6 +252,7 @@ export default function App() {
                     </span>
                   )}
                 </p>
+                {backend && <BackendInfo backend={backend} />}
                 <button
                   onClick={() => loadEngine().then((m) => m.abortUpscale())}
                   className="w-full rounded-lg border border-line py-2 text-sm hover:bg-white/5"
@@ -264,6 +268,13 @@ export default function App() {
               >
                 {result ? `Ampliar novamente (${scale}×)` : `Ampliar imagem ${scale}×`}
               </button>
+            )}
+
+            {result && status === 'done' && (
+              <div className="space-y-2 text-center">
+                <p className="text-sm text-white/70">Concluído em {result.secs}s</p>
+                {backend && <BackendInfo backend={backend} />}
+              </div>
             )}
 
             {result && status === 'done' && (
@@ -287,4 +298,17 @@ export default function App() {
       )}
     </div>
   )
+}
+
+function BackendInfo({ backend }) {
+  if (backend === 'cpu') {
+    return (
+      <p className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-left text-xs text-amber-200">
+        Processando no <b>processador (CPU)</b>, o modo mais lento. Seu navegador não liberou a placa de vídeo:
+        ative a <b>aceleração de hardware</b> nas configurações do navegador (Chrome/Edge: Configurações → Sistema) e
+        recarregue a página.
+      </p>
+    )
+  }
+  return <p className="text-center text-xs text-white/40">Usando: {BACKEND_LABEL[backend] ?? backend}</p>
 }

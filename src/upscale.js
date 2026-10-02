@@ -21,14 +21,14 @@ async function pixelsToPngUrl({ width, height, pixels }) {
 }
 
 /** Amplia a imagem num Web Worker e devolve uma URL de objeto (PNG). */
-export async function upscaleImage(url, scale, quality, onProgress) {
+export async function upscaleImage(url, scale, quality, onProgress, onBackend) {
   const imageData = await fileToImageData(url)
   const w = getWorker()
 
   const result = await new Promise((resolve, reject) => {
     w.onmessage = ({ data }) => {
-      if (data.type === 'backend') return
-      if (data.type === 'progress') onProgress?.(data.progress)
+      if (data.type === 'backend') onBackend?.(data.backend)
+      else if (data.type === 'progress') onProgress?.(data.progress)
       else if (data.type === 'done') resolve(data)
       else reject(new Error(data.message))
     }

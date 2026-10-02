@@ -40,34 +40,38 @@ function getUpscaler(quality, scale) {
   return upscalers[key]
 }
 
-// O ESRGAN só trabalha com RGB; o canal alfa é ampliado à parte por interpolação bilinear.
-function upscaleAlpha(imageData, scale) {
-  const { data, width, height } = imageData
-  const alpha = new Uint8Array(width * height)
+// O ESRGAN só trabalha com RGB; o canal alfa é ampliado à parte (bilinear, em JS).
+// Retorna null se a imagem for toda opaca.
+function upscaleAlpha({ data, width, height }, scale) {
   let opaque = true
-  for (let i = 0; i < alpha.length; i++) {
-    alpha[i] = data[i * 4 + 3]
-    if (alpha[i] !== 255) opaque = false
-  }
+  for (let i = 3; i < data.length; i += 4) if (data[i] !== 255) { opaque = false; break }
   if (opaque) return null
-  return tf.tidy(() =>
-    tf.image
-      .resizeBilinear(tf.tensor3d(alpha, [height, width, 1]), [height * scale, width * scale])
-      .round()
-      .clipByValue(0, 255)
-      .cast('int32'),
-  )
+
+  const W = width * scale
+  const H = height * scale
+  const out = new Uint8ClampedArray(W * H)
+  const at = (x, y) => data[(y * width + x) * 4 + 3]
+  for (let y = 0; y < H; y++) {
+    const sy = Math.min(Math.max((y + 0.5) / scale - 0.5, 0), height - 1)
+    const y0 = Math.floor(sy), y1 = Math.min(y0 + 1, height - 1), fy = sy - y0
+    for (let x = 0; x < W; x++) {
+      const sx = Math.min(Math.max((x + 0.5) / scale - 0.5, 0), width - 1)
+      const x0 = Math.floor(sx), x1 = Math.min(x0 + 1, width - 1), fx = sx - x0
+      const top = at(x0, y0) * (1 - fx) + at(x1, y0) * fx
+      const bottom = at(x0, y1) * (1 - fx) + at(x1, y1) * fx
+      out[y * W + x] = top * (1 - fy) + bottom * fy
+    }
+  }
+  return out
 }
 
-self.onmessage = async ({ data: { imageData, scale, quality } }) => {
+async function upscaleRGB(imageData, scale, quality) {
+  const upscaler = getUpscaler(quality, scale)
+  await upscaler.ready
+
+  // float32: o WebGPU do tfjs 4.11 gera shaders inválidos para tensores int32 no Chrome atual.
+  const input = tf.tidy(() => tf.browser.fromPixels(imageData).toFloat())
   try {
-    const backend = await backendReady
-    self.postMessage({ type: 'backend', backend })
-
-    const upscaler = getUpscaler(quality, scale)
-    await upscaler.ready
-
-    const input = tf.browser.fromPixels(imageData)
     const rgb = await upscaler.upscale(input, {
       output: 'tensor',
       patchSize: 96, // medido: mais rápido que 64/128 em GPU integrada, com memória baixa
@@ -81,20 +85,45 @@ self.onmessage = async ({ data: { imageData, scale, quality } }) => {
         })
       },
     })
-    input.dispose()
-
-    const alpha = upscaleAlpha(imageData, scale)
-    const rgba = tf.tidy(() => {
-      const color = rgb.round().clipByValue(0, 255).cast('int32')
-      const a = alpha ?? tf.fill([...color.shape.slice(0, 2), 1], 255, 'int32')
-      return tf.concat([color, a], 2)
-    })
+    const [height, width] = rgb.shape
+    const values = await rgb.data()
     rgb.dispose()
-    alpha?.dispose()
+    return { width, height, values }
+  } finally {
+    input.dispose()
+  }
+}
 
-    const [height, width] = rgba.shape
-    const pixels = new Uint8ClampedArray(await rgba.data())
-    rgba.dispose()
+self.onmessage = async ({ data: { imageData, scale, quality } }) => {
+  try {
+    let backend = await backendReady
+    self.postMessage({ type: 'backend', backend })
+
+    let rgb
+    try {
+      rgb = await upscaleRGB(imageData, scale, quality)
+    } catch (err) {
+      if (backend !== 'webgpu') throw err
+      // WebGPU ainda é instável em alguns drivers: refaz com WebGL.
+      console.warn('WebGPU falhou, refazendo com WebGL:', err)
+      for (const key in upscalers) delete upscalers[key]
+      await tf.setBackend('webgl')
+      backend = tf.getBackend()
+      self.postMessage({ type: 'backend', backend })
+      self.postMessage({ type: 'progress', progress: 0 })
+      rgb = await upscaleRGB(imageData, scale, quality)
+    }
+
+    const { width, height, values } = rgb
+    const alpha = upscaleAlpha(imageData, scale)
+    // Uint8ClampedArray arredonda e limita a 0–255 na atribuição.
+    const pixels = new Uint8ClampedArray(width * height * 4)
+    for (let i = 0, j = 0; i < width * height; i++, j += 3) {
+      pixels[i * 4] = values[j]
+      pixels[i * 4 + 1] = values[j + 1]
+      pixels[i * 4 + 2] = values[j + 2]
+      pixels[i * 4 + 3] = alpha ? alpha[i] : 255
+    }
 
     self.postMessage({ type: 'done', width, height, pixels }, [pixels.buffer])
   } catch (err) {
