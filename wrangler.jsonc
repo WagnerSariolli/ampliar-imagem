@@ -1,0 +1,6 @@
+// Deploy no Cloudflare Workers (static assets): só arquivos estáticos, sem código de servidor.
+{
+  "name": "ampliar-imagem",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./dist" }
+}

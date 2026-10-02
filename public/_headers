@@ -1,0 +1,7 @@
+# Arquivos com hash no nome nunca mudam: cache de 1 ano.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Pesos do modelo (~2,8 MB cada): cache longo no navegador e na borda.
+/models/*
+  Cache-Control: public, max-age=2592000

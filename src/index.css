@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #6c5cff;
+  --color-accent-strong: #8b7dff;
+  --color-surface: rgb(255 255 255 / 0.04);
+  --color-line: rgb(255 255 255 / 0.1);
+}
+
+html, body, #root { min-height: 100%; }
+
+body {
+  margin: 0;
+  color: #e9e9f1;
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: linear-gradient(182.35deg, #070707 1.07%, #050031 100%) fixed;
+}
