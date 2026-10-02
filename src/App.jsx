@@ -28,8 +28,10 @@ function formatBytes(bytes) {
 export default function App() {
   const [source, setSource] = useState(null) // { file, url, width, height }
   const [scale, setScale] = useState(2)
+  const [quality, setQuality] = useState('fast') // fast (esrgan-slim) | best (esrgan-medium)
   const [status, setStatus] = useState('idle') // idle | processing | done | error
   const [progress, setProgress] = useState(0)
+  const [eta, setEta] = useState(null) // segundos restantes estimados
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [dragging, setDragging] = useState(false)
@@ -85,12 +87,25 @@ export default function App() {
   async function runUpscale() {
     setStatus('processing')
     setProgress(0)
+    setEta(null)
     setResult(null)
     setError('')
     try {
       const { upscaleImage } = await loadEngine()
-      const data = await upscaleImage(source.url, scale, setProgress)
-      setResult({ src: data, scale })
+      // Estima pelo ritmo dos últimos segundos: os primeiros blocos chegam em rajada
+      // (compilação dos shaders) e distorceriam uma média desde o início.
+      const samples = []
+      const data = await upscaleImage(source.url, scale, quality, (p) => {
+        setProgress(p)
+        const now = performance.now()
+        samples.push({ now, p })
+        while (now - samples[0].now > 5000) samples.shift()
+        const first = samples[0]
+        if (now - first.now > 3000 && p > first.p) {
+          setEta(Math.ceil((((1 - p) * (now - first.now)) / (p - first.p)) / 1000))
+        }
+      })
+      setResult({ src: data, scale, quality })
       setStatus('done')
     } catch (e) {
       if (e?.name === 'AbortError') {
@@ -188,13 +203,37 @@ export default function App() {
               </p>
             </div>
 
+            <div>
+              <p className="mb-2 text-sm text-white/70">Qualidade</p>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  ['fast', 'Rápida', '~3× mais veloz'],
+                  ['best', 'Máxima', 'mais detalhe'],
+                ].map(([q, label, hint]) => (
+                  <button
+                    key={q}
+                    disabled={status === 'processing'}
+                    onClick={() => setQuality(q)}
+                    className={`rounded-lg border px-2 py-2 transition disabled:opacity-50 ${
+                      quality === q ? 'border-accent bg-accent text-white' : 'border-line hover:border-accent/60'
+                    }`}
+                  >
+                    <span className="block text-sm font-semibold">{label}</span>
+                    <span className="block text-[11px] opacity-70">{hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {tooBig && (
               <p className="text-xs text-red-300">
                 O resultado passaria de {MAX_OUTPUT_SIDE}px. Use 2× ou uma imagem menor.
               </p>
             )}
             {!tooBig && slow && status !== 'done' && (
-              <p className="text-xs text-amber-300">Imagem grande: o processamento pode levar alguns minutos.</p>
+              <p className="text-xs text-amber-300">
+                Imagem grande: pode levar alguns minutos.{quality === 'best' && ' A qualidade Rápida é ~3× mais veloz.'}
+              </p>
             )}
 
             {status === 'processing' ? (
@@ -202,7 +241,14 @@ export default function App() {
                 <div className="h-2 overflow-hidden rounded-full bg-white/10">
                   <div className="h-full bg-accent transition-[width]" style={{ width: `${Math.round(progress * 100)}%` }} />
                 </div>
-                <p className="text-center text-sm text-white/70">Ampliando… {Math.round(progress * 100)}%</p>
+                <p className="text-center text-sm text-white/70">
+                  {progress === 0 ? 'Preparando a IA…' : `Ampliando… ${Math.round(progress * 100)}%`}
+                  {eta !== null && progress < 1 && (
+                    <span className="block text-xs text-white/50">
+                      ~{eta < 60 ? `${eta}s` : `${Math.floor(eta / 60)}min ${eta % 60}s`} restantes
+                    </span>
+                  )}
+                </p>
                 <button
                   onClick={() => loadEngine().then((m) => m.abortUpscale())}
                   className="w-full rounded-lg border border-line py-2 text-sm hover:bg-white/5"

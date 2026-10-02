@@ -1,22 +1,43 @@
 import * as tf from '@tensorflow/tfjs'
+import '@tensorflow/tfjs-backend-webgpu'
 import Upscaler from 'upscaler'
-import x2 from '@upscalerjs/esrgan-medium/2x'
-import x4 from '@upscalerjs/esrgan-medium/4x'
+import slim2x from '@upscalerjs/esrgan-slim/2x'
+import slim4x from '@upscalerjs/esrgan-slim/4x'
+import medium2x from '@upscalerjs/esrgan-medium/2x'
+import medium4x from '@upscalerjs/esrgan-medium/4x'
+
+// Polyfill: o tfjs 4.11 (exigido pelo UpscalerJS) chama requestAdapterInfo(), removido no Chrome 131+.
+if (self.GPUAdapter && !GPUAdapter.prototype.requestAdapterInfo) {
+  GPUAdapter.prototype.requestAdapterInfo = function () {
+    return Promise.resolve(this.info)
+  }
+}
 
 // Pesos servidos de public/models (copiados por scripts/copy-models.mjs), sem depender de CDN.
 // Resolvidos a partir do próprio worker, para funcionar em qualquer subpasta do servidor.
-const modelUrl = (scale) => new URL(`../models/${scale}/model.json`, self.location.href).href
+const modelUrl = (size, scale) => new URL(`../models/${size}/x${scale}/model.json`, self.location.href).href
 
+// fast = esrgan-slim (~3x mais rápido), best = esrgan-medium (mais detalhe).
 const MODELS = {
-  2: { ...x2, path: modelUrl('x2') },
-  4: { ...x4, path: modelUrl('x4') },
+  fast: { 2: { ...slim2x, path: modelUrl('slim', 2) }, 4: { ...slim4x, path: modelUrl('slim', 4) } },
+  best: { 2: { ...medium2x, path: modelUrl('medium', 2) }, 4: { ...medium4x, path: modelUrl('medium', 4) } },
 }
+
+// WebGPU é ~1,5–2x mais rápido que WebGL; cai para WebGL onde não houver suporte.
+const backendReady = (async () => {
+  for (const backend of ['webgpu', 'webgl', 'cpu']) {
+    if (await tf.setBackend(backend).catch(() => false)) break
+  }
+  await tf.ready()
+  return tf.getBackend()
+})()
 
 const upscalers = {}
 
-function getUpscaler(scale) {
-  upscalers[scale] ??= new Upscaler({ model: MODELS[scale] })
-  return upscalers[scale]
+function getUpscaler(quality, scale) {
+  const key = `${quality}-${scale}`
+  upscalers[key] ??= new Upscaler({ model: MODELS[quality][scale] })
+  return upscalers[key]
 }
 
 // O ESRGAN só trabalha com RGB; o canal alfa é ampliado à parte por interpolação bilinear.
@@ -38,18 +59,27 @@ function upscaleAlpha(imageData, scale) {
   )
 }
 
-self.onmessage = async ({ data: { imageData, scale } }) => {
+self.onmessage = async ({ data: { imageData, scale, quality } }) => {
   try {
-    const upscaler = getUpscaler(scale)
+    const backend = await backendReady
+    self.postMessage({ type: 'backend', backend })
+
+    const upscaler = getUpscaler(quality, scale)
     await upscaler.ready
 
     const input = tf.browser.fromPixels(imageData)
-    // Patches pequenos mantêm o uso de memória da GPU baixo e permitem reportar progresso.
     const rgb = await upscaler.upscale(input, {
       output: 'tensor',
-      patchSize: 64,
+      patchSize: 96, // medido: mais rápido que 64/128 em GPU integrada, com memória baixa
       padding: 6,
-      progress: (p) => self.postMessage({ type: 'progress', progress: p }),
+      // Na GPU os blocos só são enfileirados aqui; esperar o bloco ficar pronto (data())
+      // faz a barra refletir o cálculo real, em vez de saltar para 100% e travar.
+      progress: (p, slice) => {
+        slice.data().then(() => {
+          slice.dispose()
+          self.postMessage({ type: 'progress', progress: p })
+        })
+      },
     })
     input.dispose()
 
